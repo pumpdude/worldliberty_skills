@@ -10,13 +10,9 @@ Openclaw skills for World Liberty Financial on-chain data.
 
 ## Usage
 
-Copy the skill directories into your Openclaw workspace:
-
 ```bash
-cp -r usd1-por ~/.openclaw/workspace/skills/
+npx skills add https://github.com/pumpdude/worldliberty_skills
 ```
-
-Or configure `skills.load.extraDirs` in your Openclaw config to point to this directory.
 
 ## Source
 
