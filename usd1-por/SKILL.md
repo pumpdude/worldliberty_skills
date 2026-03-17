@@ -331,6 +331,9 @@ if reserves and oracle_ts:
     if ratio:
         status = 'FULLY BACKED' if ratio >= 100 else 'UNDER-COLLATERALIZED'
         print(f'  Ratio      : {ratio:.2f}%  ({status})')
+        print()
+        print(f'USD1 total native supply is ${native_total:,.2f}, backed by ${reserves:,.2f} in reserves')
+        print(f'as of {ts_str}. Collateralization ratio is {ratio:.2f}% — {status.lower()}.')
 else:
     print('Oracle data unavailable — increase lookback or check DataFeedsCache address')
 ```
@@ -359,6 +362,9 @@ When reporting results, always use this format:
   Reserves   : $      4,548,344,675.61
   Updated    : 2026-03-16T22:00:16 UTC
   Ratio      : 100.00%  (FULLY BACKED)
+
+USD1 total native supply is $4,548,320,008.42, backed by $4,548,344,675.61 in reserves
+as of 2026-03-16T22:00:16 UTC. Collateralization ratio is 100.00% — fully backed.
 ```
 
 Notes:
