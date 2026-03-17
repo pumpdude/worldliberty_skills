@@ -333,7 +333,10 @@ if reserves and oracle_ts:
         print(f'  Ratio      : {ratio:.2f}%  ({status})')
         print()
         print(f'USD1 total native supply is ${native_total:,.2f}, backed by ${reserves:,.2f} in reserves')
-        print(f'as of {ts_str}. Collateralization ratio is {ratio:.2f}% — {status.lower()}.')
+        if ratio >= 100:
+            print(f'as of {ts_str}. Collateralization ratio is {ratio:.2f}% — fully backed.')
+        else:
+            print(f'as of {ts_str}. Collateralization ratio is {ratio:.2f}% — under-collateralized (possibly due to snapshot delay).')
 else:
     print('Oracle data unavailable — increase lookback or check DataFeedsCache address')
 ```
@@ -365,13 +368,16 @@ When reporting results, always use this format:
 
 USD1 total native supply is $4,548,320,008.42, backed by $4,548,344,675.61 in reserves
 as of 2026-03-16T22:00:16 UTC. Collateralization ratio is 100.00% — fully backed.
+
+# If ratio < 100%, the summary reads:
+# ...Collateralization ratio is 99.XX% — under-collateralized (possibly due to snapshot delay).
 ```
 
 Notes:
 - Dollar amounts right-aligned to 22 chars, 2 decimal places, thousands-separated
 - Chain names left-aligned to 12 chars
 - Bridged chain section is labeled "display only" and never factors into the ratio
-- Status is `FULLY BACKED` when ratio ≥ 100%, otherwise `UNDER-COLLATERALIZED`
+- Status is `FULLY BACKED` when ratio ≥ 100%; otherwise say "under-collateralized (possibly due to snapshot delay)" — do not imply a funding gap
 - If oracle data is unavailable, omit the "Proof of Reserves" section and note it
 
 ## Live Dashboard
