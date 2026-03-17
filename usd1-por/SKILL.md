@@ -62,65 +62,61 @@ Use `curl` + JSON-RPC (no extra tooling required). `cast` (Foundry) also works i
 
 ## Querying Reserves (Oracle)
 
-### Check if oracle has data
-```bash
-# latestBundleTimestamp() — returns 0 if no data written yet
-curl -s https://ethereum.publicnode.com -X POST -H "Content-Type: application/json" -d '{
-  "jsonrpc":"2.0","method":"eth_call",
-  "params":[{"to":"0x691b74146cdba162449012aa32d3cbf5df77d4c4","data":"0xe8c4be30"},"latest"],
-  "id":1
-}' | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-ts = int(d['result'], 16)
-if ts == 0:
-    print('Oracle has no data yet')
+The oracle proxy (`0x691b74...`) uses a Chainlink Keystone architecture where `latestBundle()` is permission-gated and **reverts for public callers**. Read reserves via DataFeedsCache events instead.
+
+**How it works**: The Chainlink Keystone forwarder writes bundle reports to DataFeedsCache every ~50 blocks (~10 min). Each write emits an event whose `data[0:32]` is the Unix timestamp. The reserves value is embedded in the forwarder TX input.
+
+```python
+import subprocess, json, datetime
+
+def rpc(method, params, url='https://ethereum.publicnode.com'):
+    r = subprocess.run(
+        ['curl', '-s', '--max-time', '20', url,
+         '-X', 'POST', '-H', 'Content-Type: application/json',
+         '-d', json.dumps({'jsonrpc':'2.0','method':method,'params':params,'id':1})],
+        capture_output=True, text=True, timeout=22)
+    return json.loads(r.stdout)['result']
+
+# 1. Get latest DataFeedsCache event (try increasing lookback if empty)
+latest = int(rpc('eth_blockNumber', []), 16)
+logs = []
+for lookback in [100, 200, 500, 2000]:
+    logs = rpc('eth_getLogs', [{
+        'address': '0x402641d87cBF09B57AF4161fAac37f67EF711ddB',
+        'fromBlock': hex(latest - lookback),
+        'toBlock': 'latest'
+    }])
+    if logs:
+        break
+
+if not logs:
+    print('No oracle events found in recent blocks')
 else:
-    import datetime
-    print('Last updated:', datetime.datetime.utcfromtimestamp(ts).isoformat(), 'UTC')
-"
-```
+    log = logs[-1]
 
-### Read reserves from oracle (when data is available)
-```bash
-# latestBundle() returns ABI-encoded bytes: (uint256 timestamp, uint256 reserves)
-RESULT=$(curl -s https://ethereum.publicnode.com -X POST -H "Content-Type: application/json" -d '{
-  "jsonrpc":"2.0","method":"eth_call",
-  "params":[{"to":"0x691b74146cdba162449012aa32d3cbf5df77d4c4","data":"0xa928c096"},"latest"],
-  "id":1
-}')
+    # 2. Extract timestamp from event data[0:32]
+    ts_data = bytes.fromhex(log['data'][2:])
+    ts = int.from_bytes(ts_data[0:32], 'big')
+    ts_str = datetime.datetime.utcfromtimestamp(ts).isoformat() + ' UTC'
 
-# Decode with python (strip ABI bytes wrapper, then parse two uint256 values)
-echo "$RESULT" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-raw = d.get('result', '')
-if not raw or raw == '0x':
-    print('No data'); exit()
-# ABI-encoded bytes: offset(32) + length(32) + data(64+)
-data = bytes.fromhex(raw[2:])
-offset = int.from_bytes(data[0:32], 'big')
-length = int.from_bytes(data[32:64], 'big')
-payload = data[64:64+length]
-timestamp = int.from_bytes(payload[0:32], 'big')
-reserves  = int.from_bytes(payload[32:64], 'big') / 1e18
-import datetime
-print(f'Reserves: \${reserves:,.2f}')
-print(f'Updated:  {datetime.datetime.utcfromtimestamp(timestamp).isoformat()} UTC')
-"
-```
+    # 3. Scan TX input for reserves value ($4B–$6B range, 18 decimals)
+    tx = rpc('eth_getTransactionByHash', [log['transactionHash']])
+    inp = bytes.fromhex(tx['input'][2:])
+    TARGET_MIN = int(4e9 * 1e18)
+    TARGET_MAX = int(6e9 * 1e18)
+    reserves = None
+    for i in range(0, len(inp) - 31):
+        val = int.from_bytes(inp[i:i+32], 'big')
+        if TARGET_MIN < val < TARGET_MAX:
+            reserves = val / 1e18
+            break
 
-### With cast (if Foundry installed)
-```bash
-# Check timestamp
-cast call 0x691b74146cdba162449012aa32d3cbf5df77d4c4 "latestBundleTimestamp()(uint256)" \
-  --rpc-url https://ethereum.publicnode.com
-
-# Read bundle and decode
-BUNDLE=$(cast call 0x691b74146cdba162449012aa32d3cbf5df77d4c4 "latestBundle()(bytes)" \
-  --rpc-url https://ethereum.publicnode.com)
-cast abi-decode "x()(uint256,uint256)" "$BUNDLE"
-# divide second value by 1e18 to get USD reserves
+    if reserves:
+        print(f'Reserves: ${reserves:,.2f}')
+        print(f'Updated:  {ts_str}')
+    else:
+        print(f'Timestamp: {ts_str}')
+        print('Could not locate reserves value in TX input (adjust TARGET_MIN/MAX if supply has moved outside $4B–$6B)')
 ```
 
 ## Querying USD1 Supply
@@ -198,6 +194,146 @@ Bridged chain supply (Plume, AB Core, Monad, Mantle, Morph) is **excluded** — 
 **Collateralization ratio = Reserves / Total native supply × 100%**
 
 A ratio ≥ 100% means USD1 is fully backed. If the oracle has no data, report supply only and note that reserve data is not yet available.
+
+## Full Collateralization Ratio Calculation
+
+Combine the oracle reserves query with native-chain supply to compute the ratio end-to-end:
+
+```python
+import subprocess, json, datetime
+
+def rpc(method, params, url='https://ethereum.publicnode.com'):
+    r = subprocess.run(
+        ['curl', '-s', '--max-time', '20', url,
+         '-X', 'POST', '-H', 'Content-Type: application/json',
+         '-d', json.dumps({'jsonrpc':'2.0','method':method,'params':params,'id':1})],
+        capture_output=True, text=True, timeout=22)
+    return json.loads(r.stdout)['result']
+
+def eth_call(rpc_url, to):
+    r = subprocess.run(
+        ['curl', '-s', '--max-time', '20', rpc_url,
+         '-X', 'POST', '-H', 'Content-Type: application/json',
+         '-d', json.dumps({'jsonrpc':'2.0','method':'eth_call',
+           'params':[{'to':to,'data':'0x18160ddd'},'latest'],'id':1})],
+        capture_output=True, text=True, timeout=22)
+    return int(json.loads(r.stdout)['result'], 16)
+
+# ── 1. Oracle reserves ──────────────────────────────────────────────────────
+latest = int(rpc('eth_blockNumber', []), 16)
+logs = []
+for lookback in [100, 200, 500, 2000]:
+    logs = rpc('eth_getLogs', [{
+        'address': '0x402641d87cBF09B57AF4161fAac37f67EF711ddB',
+        'fromBlock': hex(latest - lookback),
+        'toBlock': 'latest'
+    }])
+    if logs:
+        break
+
+reserves = None
+oracle_ts = None
+if logs:
+    log = logs[-1]
+    ts_data = bytes.fromhex(log['data'][2:])
+    oracle_ts = int.from_bytes(ts_data[0:32], 'big')
+    tx = rpc('eth_getTransactionByHash', [log['transactionHash']])
+    inp = bytes.fromhex(tx['input'][2:])
+    for i in range(0, len(inp) - 31):
+        val = int.from_bytes(inp[i:i+32], 'big')
+        if int(4e9 * 1e18) < val < int(6e9 * 1e18):
+            reserves = val / 1e18
+            break
+
+# ── 2. Native-chain supply ──────────────────────────────────────────────────
+USD1    = '0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d'
+BRIDGED = '0x111111d2bf19e43C34263401e0CAd979eD1cdb61'
+
+supply = {}
+
+# Ethereum
+supply['Ethereum'] = eth_call('https://ethereum.publicnode.com', USD1) / 1e18
+
+# BNB Chain
+supply['BNB Chain'] = eth_call('https://bsc.publicnode.com', USD1) / 1e18
+
+# Tron (tronscanapi)
+r = subprocess.run(
+    ['curl', '-s', '--max-time', '20',
+     'https://apilist.tronscanapi.com/api/token_trc20?contract=TPFqcBAaaUMCSVRCqPaQ9QnzKhmuoLR6Rc'],
+    capture_output=True, text=True, timeout=22)
+t = json.loads(r.stdout)['trc20_tokens'][0]
+supply['Tron'] = int(t['total_supply_with_decimals']) / 10**int(t['decimals'])
+
+# Aptos (ConcurrentSupply, decimals=6)
+r = subprocess.run(
+    ['curl', '-s', '--max-time', '20',
+     'https://fullnode.mainnet.aptoslabs.com/v1/accounts/'
+     '0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2'
+     '/resource/0x1::fungible_asset::ConcurrentSupply'],
+    capture_output=True, text=True, timeout=22)
+supply['Aptos'] = int(json.loads(r.stdout)['data']['current']['value']) / 1e6
+
+# Solana (getTokenSupply, decimals=6) — may be blocked depending on network
+try:
+    r = subprocess.run(
+        ['curl', '-s', '--max-time', '20', 'https://solana-rpc.publicnode.com',
+         '-X', 'POST', '-H', 'Content-Type: application/json',
+         '-d', json.dumps({'jsonrpc':'2.0','id':1,'method':'getTokenSupply',
+           'params':['USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB']})],
+        capture_output=True, text=True, timeout=22)
+    supply['Solana'] = json.loads(r.stdout)['result']['value']['uiAmount']
+except Exception:
+    supply['Solana'] = None  # network-dependent; exclude from total if unavailable
+
+# ── 3. Bridged-chain supply (display only, not counted in ratio) ────────────
+bridged_chains = [
+    ('Plume',   'https://rpc.plume.org',    BRIDGED, 18),
+    ('AB Core', 'https://rpc.core.ab.org',  BRIDGED, 18),
+    ('Monad',   'https://rpc.monad.xyz',    BRIDGED,  6),
+    ('Mantle',  'https://rpc.mantle.xyz',   BRIDGED, 18),
+    ('Morph',   'https://rpc.morphl2.io',   BRIDGED, 18),
+]
+bridged_supply = {}
+for name, rpc_url, addr, dec in bridged_chains:
+    try:
+        bridged_supply[name] = eth_call(rpc_url, addr) / 10**dec
+    except Exception:
+        bridged_supply[name] = None
+
+# ── 4. Print results ────────────────────────────────────────────────────────
+print('=== USD1 Supply (Native Chains) ===')
+native_total = 0
+for chain in ['Ethereum', 'BNB Chain', 'Tron', 'Aptos', 'Solana']:
+    val = supply.get(chain)
+    if val is not None:
+        native_total += val
+        print(f'  {chain:<12}: ${val:>22,.2f}')
+    else:
+        print(f'  {chain:<12}: unavailable')
+print(f'  {"Native Total":<12}: ${native_total:>22,.2f}')
+
+print()
+print('=== USD1 Supply (Bridged Chains, display only) ===')
+for chain, val in bridged_supply.items():
+    if val is not None:
+        print(f'  {chain:<12}: ${val:>22,.2f}')
+    else:
+        print(f'  {chain:<12}: unavailable')
+
+print()
+if reserves and oracle_ts:
+    ts_str = datetime.datetime.utcfromtimestamp(oracle_ts).isoformat() + ' UTC'
+    ratio = (reserves / native_total * 100) if native_total else None
+    print(f'=== Proof of Reserves ===')
+    print(f'  Reserves   : ${reserves:>22,.2f}')
+    print(f'  Updated    : {ts_str}')
+    if ratio:
+        status = 'FULLY BACKED' if ratio >= 100 else 'UNDER-COLLATERALIZED'
+        print(f'  Ratio      : {ratio:.2f}%  ({status})')
+else:
+    print('Oracle data unavailable — increase lookback or check DataFeedsCache address')
+```
 
 ## Live Dashboard
 https://por.worldlibertyfinancial.com
