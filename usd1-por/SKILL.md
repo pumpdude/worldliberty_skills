@@ -335,5 +335,38 @@ else:
     print('Oracle data unavailable — increase lookback or check DataFeedsCache address')
 ```
 
+## Output Format
+
+When reporting results, always use this format:
+
+```
+=== USD1 Supply (Native Chains) ===
+  Ethereum    : $      1,817,002,138.47
+  BNB Chain   : $      1,857,177,238.85
+  Tron        : $         10,062,502.90
+  Aptos       : $          9,359,857.56
+  Solana      : $        854,718,270.63
+  Native Total: $      4,548,320,008.42
+
+=== USD1 Supply (Bridged Chains, display only) ===
+  Plume       : $              1,198.36
+  AB Core     : $          3,182,885.67
+  Monad       : $            100,646.65
+  Mantle      : $          1,000,010.81
+  Morph       : $                  0.00
+
+=== Proof of Reserves ===
+  Reserves   : $      4,548,344,675.61
+  Updated    : 2026-03-16T22:00:16 UTC
+  Ratio      : 100.00%  (FULLY BACKED)
+```
+
+Notes:
+- Dollar amounts right-aligned to 22 chars, 2 decimal places, thousands-separated
+- Chain names left-aligned to 12 chars
+- Bridged chain section is labeled "display only" and never factors into the ratio
+- Status is `FULLY BACKED` when ratio ≥ 100%, otherwise `UNDER-COLLATERALIZED`
+- If oracle data is unavailable, omit the "Proof of Reserves" section and note it
+
 ## Live Dashboard
 https://por.worldlibertyfinancial.com
